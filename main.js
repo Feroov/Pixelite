@@ -96,6 +96,7 @@ let music = {
   game: null,
   current: null,
 };
+let audioUnlocked = false;
 
 // === Utilities ================================================================
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -1475,6 +1476,24 @@ function setupMusic() {
   updateMusicMute();
 }
 
+function unlockAudioOnce() {
+  if (audioUnlocked) return;
+  audioUnlocked = true;
+
+  // Wake up WebAudio (SFX/ambient) and sync mute state
+  resumeAudio();
+  updateMusicMute();
+
+  // If we're on the menu at first load, start menu music now
+  if (gameState === "menu") {
+    playMenuMusic();
+  }
+
+  // remove listeners once unlocked
+  window.removeEventListener("pointerdown", unlockAudioOnce);
+  window.removeEventListener("keydown", unlockAudioOnce);
+}
+
 function stopMusic() {
   if (music.current) {
     music.current.pause();
@@ -1485,7 +1504,7 @@ function stopMusic() {
 
 function playMenuMusic() {
   if (!music.menu) return;
-  stopAmbientMusic(); // avoid overlapping with ambient chirps
+  stopAmbientMusic();
   if (settings.mute) return;
   stopMusic();
   music.current = music.menu;
@@ -1494,7 +1513,7 @@ function playMenuMusic() {
 
 function playGameMusic() {
   if (!music.game) return;
-  stopAmbientMusic(); // avoid overlapping with ambient chirps
+  stopAmbientMusic();
   if (settings.mute) return;
   stopMusic();
   music.current = music.game;
@@ -1537,6 +1556,8 @@ async function init() {
   ctx = canvas.getContext("2d");
   if (ctx) ctx.imageSmoothingEnabled = false;
   setupMusic();
+  window.addEventListener("pointerdown", unlockAudioOnce, { once: true });
+  window.addEventListener("keydown", unlockAudioOnce, { once: true });
   minimapCanvas = document.getElementById("minimap");
   if (minimapCanvas) {
     minimapCanvas.width = MINIMAP_W;
