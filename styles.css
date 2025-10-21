@@ -299,7 +299,7 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 1px;
+  gap: 2px;
 }
 .battle-label {
   font-size: 12px;
@@ -392,6 +392,12 @@ body {
   font-size: 13px;
   letter-spacing: 0.8px;
   text-transform: uppercase;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  width: 100%;
+  height: 100%;
 }
 .battle-btn .battle-summary {
   font-size: 12px;
