@@ -30,6 +30,23 @@ const FOOTSTEP_PRESETS = {
   [TILE.GRASS]: { freq: 220, duration: 0.13, gain: 0.08 },
   [TILE.SAND]: { freq: 170, duration: 0.17, gain: 0.1 },
 };
+const MOVE_KEYS = {
+  arrowup: { dx: 0, dy: -1 },
+  w: { dx: 0, dy: -1 },
+  arrowdown: { dx: 0, dy: 1 },
+  s: { dx: 0, dy: 1 },
+  arrowleft: { dx: -1, dy: 0 },
+  a: { dx: -1, dy: 0 },
+  arrowright: { dx: 1, dy: 0 },
+  d: { dx: 1, dy: 0 },
+};
+const MOVE_HOLD_DELAY = 0.5; // seconds between auto-steps when holding a key
+const PLAYER_RENDER_LERP = 14;
+const ENEMY_RENDER_LERP = 12;
+const MENU_MUSIC_VOLUME = 0.48;
+const GAME_MUSIC_VOLUME = 0.44;
+const GAME_MUSIC_BATTLE_VOLUME = 0.2;
+const LEVEL_MUSIC_VOLUME = 0.6;
 const ENEMY_SPRITES = [
   "assets/enemy1.png",
   "assets/enemy2.png",
@@ -38,24 +55,66 @@ const ENEMY_SPRITES = [
   "assets/enemy5.png",
 ];
 const ENEMY_SIZE = 28;
-const ENEMY_SPEED_BASE = 70;
-const ENEMY_SPEED_STEP = 6;
-const ENEMY_WANDER_INTERVAL = { min: 1.5, max: 3.5 };
 const ENEMY_AGGRO_DISTANCE_BASE = TILE_SIZE * 2;
 const ENEMY_AGGRO_DISTANCE_STEP = TILE_SIZE * 0.25;
-const ENEMY_COLLIDE_DISTANCE = TILE_SIZE * 0.6;
 const PLAYER_BATTLE_HP = 30;
 const ENEMY_BATTLE_HP = 20;
 const BATTLE_MOVES = [
-  { id: "quick", label: "Quick Jab ", hit: 0.9, dmg: [4, 7] },
-  { id: "heavy", label: "Heavy Swing ", hit: 0.65, dmg: [7, 12] },
-  { id: "feint", label: "Cunning Feint ", hit: 0.5, dmg: [0, 15] },
+  {
+    id: "quick",
+    label: "Quick Jab",
+    icon: "⚡",
+    summary: "Fast and reliable.",
+    hit: 0.9,
+    dmg: [4, 7],
+  },
+  {
+    id: "heavy",
+    label: "Heavy Swing",
+    icon: "🗡️",
+    summary: "Crush foes with power.",
+    hit: 0.65,
+    dmg: [7, 12],
+  },
+  {
+    id: "skill3",
+    label: "Locked Skill",
+    icon: "🔒",
+    locked: true,
+    hint: "Unlock later in your journey.",
+  },
+  {
+    id: "skill4",
+    label: "Locked Skill",
+    icon: "🔒",
+    locked: true,
+    hint: "To be revealed soon.",
+  },
+  {
+    id: "skill5",
+    label: "Locked Skill",
+    icon: "🔒",
+    locked: true,
+    hint: "Coming in a future update.",
+  },
 ];
 const ENEMY_COUNTER = { hit: 0.7, dmg: [3, 8] };
 const HEART_VALUE = 5;
+
+const COIN_IMG = "assets/coin.png";
+const COIN_GROUND_COUNT = 5;
+const COIN_REWARD = [3, 10];
+const COIN_DRAW_SCALE = 2;
+const FLOATER_LIFETIME = 0.9;
+const FLOATER_RISE = 36;
+const COIN_FLOAT_COLOR = "#ffd86b";
+
 // === Globals =================================================================
 let canvas, ctx;
 let keys = Object.create(null);
+let moveQueue = [];
+let heldMoveKey = null;
+let holdElapsed = 0;
 let images = {};
 let map = null;
 let worldSeed = null;
@@ -64,9 +123,10 @@ let player = {
   y: 5 * TILE_SIZE,
   w: 24,
   h: 24,
-  speed: 140,
   lastTileX: null,
   lastTileY: null,
+  renderX: 5 * TILE_SIZE,
+  renderY: 5 * TILE_SIZE,
 };
 let camera = { x: 0, y: 0, targetX: 0, targetY: 0 };
 let stats = { steps: 0, playTimeMs: 0 };
@@ -94,15 +154,83 @@ let accessibleTiles = new Set();
 let music = {
   menu: null,
   game: null,
+  levelUp: null,
   current: null,
 };
+let pendingMenuMusic = false;
 let audioUnlocked = false;
+let pendingLevelConfig = null;
+let levelUpUI = {};
+let coins = 0;
+let groundCoins = [];
+let floaters = [];
+let battlePaused = false;
 
 // === Utilities ================================================================
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const randRange = (min, max) => min + Math.random() * (max - min);
 const randInt = (min, max) => Math.floor(randRange(min, max + 1));
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const tileKey = (x, y) => y * MAP_W + x;
+function coinDrawSize() {
+  const img = images[COIN_IMG];
+  const base = img ? img.width : 16;
+  return Math.min(base * COIN_DRAW_SCALE, TILE_SIZE);
+}
+const tileCenter = (x, y) => ({
+  x: (x + 0.5) * TILE_SIZE,
+  y: (y + 0.5) * TILE_SIZE,
+});
+const smoothTowards = (current, target, rate, dt) =>
+  current + (target - current) * Math.min(1, dt * rate);
+function shuffledCardinalDirs() {
+  const dirs = [
+    { dx: 1, dy: 0 },
+    { dx: -1, dy: 0 },
+    { dx: 0, dy: 1 },
+    { dx: 0, dy: -1 },
+  ];
+  for (let i = dirs.length - 1; i > 0; i--) {
+    const j = randInt(0, i);
+    [dirs[i], dirs[j]] = [dirs[j], dirs[i]];
+  }
+  return dirs;
+}
+function floaterAnchor() {
+  const baseX = (player.renderX ?? player.x ?? 0) + (player.w ?? TILE_SIZE) / 2;
+  const baseY =
+    (player.renderY ?? player.y ?? 0) + Math.max(player.h ?? TILE_SIZE, 16) * 0.3;
+  return { x: baseX, y: baseY };
+}
+function spawnFloater(text, color = COIN_FLOAT_COLOR, worldX, worldY) {
+  const anchor = floaterAnchor();
+  floaters.push({
+    id: `floater-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+    text,
+    color,
+    x: worldX ?? anchor.x,
+    y: worldY ?? anchor.y,
+    age: 0,
+    life: FLOATER_LIFETIME,
+  });
+}
+function spawnCoinFloater(amount, options = {}) {
+  const { worldX, worldY, color = COIN_FLOAT_COLOR } = options;
+  const label =
+    options.label ??
+    `+${amount} coin${amount === 1 ? "" : "s"}`;
+  spawnFloater(label, color, worldX, worldY, COIN_IMG);
+}
+function updateFloaters(dt) {
+  if (!floaters.length) return;
+  for (let i = floaters.length - 1; i >= 0; i--) {
+    const floater = floaters[i];
+    floater.age += dt;
+    if (floater.age >= floater.life) {
+      floaters.splice(i, 1);
+    }
+  }
+}
 function srand(seed) {
   // mulberry32
   let t = seed >>> 0;
@@ -145,7 +273,7 @@ function loadImage(src) {
 async function loadAssets() {
   const entries = Object.values(TILE_INFO).map((t) => t.img);
   const unique = Array.from(
-    new Set([...entries, "assets/player.png", ...ENEMY_SPRITES])
+    new Set([...entries, "assets/player.png", COIN_IMG, ...ENEMY_SPRITES])
   );
   const loaded = await Promise.all(unique.map(loadImage));
   for (let i = 0; i < unique.length; i++) images[unique[i]] = loaded[i];
@@ -287,6 +415,7 @@ function pickRandomGrassSpawn(m, seed) {
   const pick = open[Math.floor(rnd() * open.length)];
   return pick;
 }
+
 function findOpenTile(minDistanceTiles = 2) {
   if (!map) return { x: 0, y: 0 };
   let pool = [];
@@ -318,6 +447,42 @@ function findOpenTile(minDistanceTiles = 2) {
   }
   return pool[Math.floor(Math.random() * pool.length)];
 }
+
+function spawnGroundCoins(count = COIN_GROUND_COUNT) {
+  groundCoins = [];
+  const used = new Set();
+  // Avoid player start & enemy tiles
+  if (player.lastTileX != null && player.lastTileY != null) {
+    used.add(tileKey(player.lastTileX, player.lastTileY));
+  }
+  for (const e of enemies) {
+    if (e.alive) used.add(tileKey(e.tileX, e.tileY));
+  }
+
+  let tries = 0;
+  while (groundCoins.length < count && tries < 1000) {
+    tries++;
+    const tile = findOpenTile(6); // keep them away a bit; “uncommon”
+    const key = tileKey(tile.x, tile.y);
+    if (used.has(key)) continue;
+    if (!isPassableTile(tileAt(tile.x, tile.y))) continue;
+    if (accessibleTiles.size && !accessibleTiles.has(key)) continue;
+    used.add(key);
+    groundCoins.push({
+      id: `coin-${tile.x}-${tile.y}-${Math.floor(Math.random() * 1e6)}`,
+      tileX: tile.x,
+      tileY: tile.y,
+      collected: false,
+    });
+  }
+}
+function coinAtTile(tx, ty) {
+  return (
+    groundCoins.find((c) => !c.collected && c.tileX === tx && c.tileY === ty) ||
+    null
+  );
+}
+
 function computeAccessibleTiles(startX, startY) {
   const result = new Set();
   if (!map || startX == null || startY == null) return result;
@@ -358,6 +523,10 @@ function spawnEnemies(count) {
   if (!accessibleTiles.size && player.lastTileX != null) {
     refreshAccessibility();
   }
+  const usedTiles = new Set();
+  if (player.lastTileX != null && player.lastTileY != null) {
+    usedTiles.add(tileKey(player.lastTileX, player.lastTileY));
+  }
   const levelFactor = Math.max(0, level - 1);
   for (let i = 0; i < count; i++) {
     let tile;
@@ -366,18 +535,11 @@ function spawnEnemies(count) {
       tile = findOpenTile(3);
       tries++;
     } while (
-      tries < 60 &&
-      enemies.some(
-        (e) =>
-          Math.hypot(
-            e.x + e.w / 2 - (tile.x + 0.5) * TILE_SIZE,
-            e.y + e.h / 2 - (tile.y + 0.5) * TILE_SIZE
-          ) < TILE_SIZE
-      )
+      tries < 120 &&
+      (usedTiles.has(tileKey(tile.x, tile.y)) ||
+        (accessibleTiles.size && !accessibleTiles.has(tileKey(tile.x, tile.y))))
     );
     const baseHp = ENEMY_BATTLE_HP + levelFactor * 5;
-    const speed =
-      ENEMY_SPEED_BASE + levelFactor * ENEMY_SPEED_STEP + randRange(-10, 20);
     const detectionRadius =
       ENEMY_AGGRO_DISTANCE_BASE + levelFactor * ENEMY_AGGRO_DISTANCE_STEP;
     const attackHit = clamp(ENEMY_COUNTER.hit + levelFactor * 0.03, 0, 0.97);
@@ -385,18 +547,13 @@ function spawnEnemies(count) {
     const attackMax = ENEMY_COUNTER.dmg[1] + levelFactor * 2;
     const enemy = {
       id: `enemy-${Date.now()}-${i}-${Math.floor(Math.random() * 1000)}`,
-      x: (tile.x + 0.5) * TILE_SIZE - ENEMY_SIZE / 2,
-      y: (tile.y + 0.5) * TILE_SIZE - ENEMY_SIZE / 2,
+      tileX: tile.x,
+      tileY: tile.y,
+      x: 0,
+      y: 0,
       w: ENEMY_SIZE,
       h: ENEMY_SIZE,
-      speed,
-      state: "wander",
-      wanderTimer: randRange(
-        ENEMY_WANDER_INTERVAL.min,
-        ENEMY_WANDER_INTERVAL.max
-      ),
-      dirX: 0,
-      dirY: 0,
+      state: "idle",
       alive: true,
       sprite: ENEMY_SPRITES[randInt(0, ENEMY_SPRITES.length - 1)],
       maxHp: baseHp,
@@ -404,7 +561,9 @@ function spawnEnemies(count) {
       detectionRadius,
       attack: { hit: attackHit, dmg: [attackMin, attackMax] },
     };
+    setEnemyWorldPosition(enemy, { syncRender: true });
     enemies.push(enemy);
+    usedTiles.add(tileKey(enemy.tileX, enemy.tileY));
   }
   minimapDirty = true;
 }
@@ -413,14 +572,12 @@ function serializeEnemies() {
     .filter((e) => e.alive)
     .map((e) => ({
       id: e.id,
+      tileX: e.tileX,
+      tileY: e.tileY,
       x: e.x,
       y: e.y,
       w: e.w,
       h: e.h,
-      speed: e.speed,
-      dirX: e.dirX,
-      dirY: e.dirY,
-      wanderTimer: e.wanderTimer,
       sprite: e.sprite,
       maxHp: e.maxHp,
       battleHp: e.battleHp,
@@ -437,62 +594,71 @@ function serializeEnemies() {
 }
 function restoreEnemies(list = []) {
   const lvlFactor = Math.max(0, level - 1);
-  enemies = list.map((data, idx) => ({
-    id: data.id ?? `enemy-${Date.now()}-${idx}`,
-    x: data.x ?? 0,
-    y: data.y ?? 0,
-    w: data.w ?? ENEMY_SIZE,
-    h: data.h ?? ENEMY_SIZE,
-    speed: data.speed ?? ENEMY_SPEED_BASE,
-    dirX: data.dirX ?? 0,
-    dirY: data.dirY ?? 0,
-    wanderTimer:
-      data.wanderTimer ??
-      randRange(ENEMY_WANDER_INTERVAL.min, ENEMY_WANDER_INTERVAL.max),
-    sprite:
-      data.sprite && ENEMY_SPRITES.includes(data.sprite)
-        ? data.sprite
-        : ENEMY_SPRITES[idx % ENEMY_SPRITES.length],
-    maxHp: data.maxHp ?? ENEMY_BATTLE_HP,
-    battleHp: data.battleHp ?? ENEMY_BATTLE_HP,
-    state: "wander",
-    alive: true,
-    detectionRadius:
-      data.detectionRadius ??
-      ENEMY_AGGRO_DISTANCE_BASE + lvlFactor * ENEMY_AGGRO_DISTANCE_STEP,
-    attack: (() => {
-      const attackData = data.attack;
-      if (attackData && typeof attackData === "object") {
-        const dmgArr =
-          Array.isArray(attackData.dmg) && attackData.dmg.length >= 2
-            ? [...attackData.dmg]
-            : [...ENEMY_COUNTER.dmg];
+  enemies = list.map((data, idx) => {
+    const width = data.w ?? ENEMY_SIZE;
+    const height = data.h ?? ENEMY_SIZE;
+    const rawTileX =
+      typeof data.tileX === "number" && Number.isFinite(data.tileX)
+        ? data.tileX
+        : ((data.x ?? 0) + width / 2) / TILE_SIZE;
+    const rawTileY =
+      typeof data.tileY === "number" && Number.isFinite(data.tileY)
+        ? data.tileY
+        : ((data.y ?? 0) + height / 2) / TILE_SIZE;
+    const enemy = {
+      id: data.id ?? `enemy-${Date.now()}-${idx}`,
+      tileX: clamp(Math.floor(rawTileX), 0, MAP_W - 1),
+      tileY: clamp(Math.floor(rawTileY), 0, MAP_H - 1),
+      x: 0,
+      y: 0,
+      w: width,
+      h: height,
+      state: "idle",
+      alive: true,
+      sprite:
+        data.sprite && ENEMY_SPRITES.includes(data.sprite)
+          ? data.sprite
+          : ENEMY_SPRITES[idx % ENEMY_SPRITES.length],
+      maxHp: data.maxHp ?? ENEMY_BATTLE_HP,
+      battleHp: data.battleHp ?? ENEMY_BATTLE_HP,
+      detectionRadius:
+        data.detectionRadius ??
+        ENEMY_AGGRO_DISTANCE_BASE + lvlFactor * ENEMY_AGGRO_DISTANCE_STEP,
+      attack: (() => {
+        const attackData = data.attack;
+        if (attackData && typeof attackData === "object") {
+          const dmgArr =
+            Array.isArray(attackData.dmg) && attackData.dmg.length >= 2
+              ? [...attackData.dmg]
+              : [...ENEMY_COUNTER.dmg];
+          return {
+            hit: clamp(
+              attackData.hit ?? ENEMY_COUNTER.hit + lvlFactor * 0.03,
+              0,
+              0.97
+            ),
+            dmg: dmgArr,
+          };
+        }
         return {
-          hit: clamp(
-            attackData.hit ?? ENEMY_COUNTER.hit + lvlFactor * 0.03,
-            0,
-            0.97
-          ),
-          dmg: dmgArr,
+          hit: clamp(ENEMY_COUNTER.hit + lvlFactor * 0.03, 0, 0.97),
+          dmg: [
+            ENEMY_COUNTER.dmg[0] + lvlFactor,
+            ENEMY_COUNTER.dmg[1] + lvlFactor * 2,
+          ],
         };
-      }
-      return {
-        hit: clamp(ENEMY_COUNTER.hit + lvlFactor * 0.03, 0, 0.97),
-        dmg: [
-          ENEMY_COUNTER.dmg[0] + lvlFactor,
-          ENEMY_COUNTER.dmg[1] + lvlFactor * 2,
-        ],
-      };
-    })(),
-  }));
+      })(),
+    };
+    setEnemyWorldPosition(enemy, { syncRender: true });
+    return enemy;
+  });
   for (const enemy of enemies) {
-    const tx = Math.floor((enemy.x + enemy.w / 2) / TILE_SIZE);
-    const ty = Math.floor((enemy.y + enemy.h / 2) / TILE_SIZE);
-    const key = ty * MAP_W + tx;
+    const key = tileKey(enemy.tileX, enemy.tileY);
     if (accessibleTiles.size && !accessibleTiles.has(key)) {
       const tile = findOpenTile(2);
-      enemy.x = (tile.x + 0.5) * TILE_SIZE - enemy.w / 2;
-      enemy.y = (tile.y + 0.5) * TILE_SIZE - enemy.h / 2;
+      enemy.tileX = tile.x;
+      enemy.tileY = tile.y;
+      setEnemyWorldPosition(enemy, { syncRender: true });
     }
     enemy.battleHp = Math.min(enemy.battleHp, enemy.maxHp);
   }
@@ -510,6 +676,8 @@ function saveState() {
     stats: { ...stats },
     level,
     score,
+    coins,
+    groundCoins: groundCoins.map((c) => ({ ...c })),
     enemies: serializeEnemies(),
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -519,8 +687,10 @@ function saveState() {
     settings: { ...state.settings },
     stats: { ...state.stats },
     enemies: state.enemies.map((e) => ({ ...e })),
+    groundCoins: state.groundCoins.map((c) => ({ ...c })),
   };
 }
+
 function loadState() {
   const raw = localStorage.getItem(STORAGE_KEY);
   if (!raw) return null;
@@ -533,12 +703,15 @@ function loadState() {
     data.stats = { steps: 0, playTimeMs: 0, ...data.stats };
     data.level = data.level ?? 1;
     data.score = data.score ?? 0;
+    data.coins = data.coins ?? 0;
+    data.groundCoins = Array.isArray(data.groundCoins) ? data.groundCoins : [];
     data.enemies = Array.isArray(data.enemies) ? data.enemies : [];
     return data;
   } catch {
     return null;
   }
 }
+
 function migrateSave(old) {
   // placeholder for future migrations
   return {
@@ -550,11 +723,18 @@ function migrateSave(old) {
   };
 }
 function resetState(withNewSeed = true) {
+  coins = 0;
+  groundCoins = [];
+
   const nextSeed = withNewSeed
     ? (Math.random() * 2 ** 32) | 0
     : worldSeed ?? (Math.random() * 2 ** 32) | 0;
+  pendingLevelConfig = null;
+  hideLevelUpScreen();
+  battlePaused = false;
   localStorage.removeItem(STORAGE_KEY);
   savedSnapshot = null;
+  floaters = [];
   if (withNewSeed) {
     startFreshGame(nextSeed);
   } else {
@@ -575,13 +755,25 @@ function setupInput() {
     "ArrowRight",
     " ",
   ]);
+  const recordMoveHold = (key) => {
+    heldMoveKey = key;
+    holdElapsed = 0;
+  };
   window.addEventListener(
     "keydown",
     (e) => {
       const key = e.key.toLowerCase();
+      const move = MOVE_KEYS[key];
       if (gameState === "battle") {
-        if (!e.repeat && key === "m") toggleMute();
-        e.preventDefault();
+        if (!e.repeat) {
+          if (key === "escape") {
+            pauseBattleToMenu();
+            e.preventDefault();
+            return;
+          }
+          if (key === "m") toggleMute();
+        }
+        if (block.has(e.key)) e.preventDefault();
         return;
       }
       const isPlaying = gameState === "playing";
@@ -600,7 +792,18 @@ function setupInput() {
         e.preventDefault();
         return;
       }
-      keys[key] = true;
+      if (move) {
+        if (!keys[key]) {
+          keys[key] = true;
+          moveQueue.push(move);
+          recordMoveHold(key);
+        } else if (!e.repeat) {
+          recordMoveHold(key);
+        }
+        resumeAudio();
+        if (block.has(e.key)) e.preventDefault();
+        return;
+      }
       if (!e.repeat && key === "m") toggleMute();
       resumeAudio();
       if (block.has(e.key)) e.preventDefault();
@@ -611,7 +814,17 @@ function setupInput() {
     "keyup",
     (e) => {
       if (gameState !== "playing") return;
-      keys[e.key.toLowerCase()] = false;
+      const key = e.key.toLowerCase();
+      const move = MOVE_KEYS[key];
+      keys[key] = false;
+      if (move) {
+        if (heldMoveKey === key) {
+          heldMoveKey = findHeldMoveKey();
+          holdElapsed = 0;
+        }
+        if (block.has(e.key)) e.preventDefault();
+        return;
+      }
       if (block.has(e.key)) e.preventDefault();
     },
     { passive: false }
@@ -626,12 +839,30 @@ function isPassableTile(tileId) {
   return tileId === TILE.GRASS || tileId === TILE.SAND;
 }
 function tileAt(tx, ty) {
-  if (ty < 0 || tx < 0 || ty >= MAP_H || tx >= MAP_W) return TILE.WATER; // out of bounds solid
+  if (!Number.isFinite(tx) || !Number.isFinite(ty)) return TILE.WATER;
   if (!map) return TILE.WATER;
-  return map[ty][tx];
+  const ix = Math.floor(tx);
+  const iy = Math.floor(ty);
+  if (iy < 0 || ix < 0 || iy >= MAP_H || ix >= MAP_W) return TILE.WATER; // out of bounds solid
+  const row = map[iy];
+  if (!row) return TILE.WATER;
+  return row[ix];
 }
 function clearMovementKeys() {
   for (const key of Object.keys(keys)) keys[key] = false;
+  moveQueue = [];
+  heldMoveKey = null;
+  holdElapsed = 0;
+}
+function findHeldMoveKey() {
+  for (const key of Object.keys(MOVE_KEYS)) {
+    if (keys[key]) return key;
+  }
+  return null;
+}
+function syncPlayerRender() {
+  player.renderX = player.x;
+  player.renderY = player.y;
 }
 function worldToScreen(wx, wy) {
   return { x: Math.floor(wx - camera.x), y: Math.floor(wy - camera.y) };
@@ -664,10 +895,42 @@ function setMoveButtonContent(btn, move) {
     btn.disabled = true;
     return;
   }
-  btn.style.display = "block";
+  btn.style.display = "flex";
+  btn.dataset.moveId = move.id ?? "";
+  if (!btn.dataset.enhanced) {
+    btn.innerHTML = `
+      <span class="battle-icon"></span>
+      <span class="battle-title"></span>
+      <span class="battle-summary"></span>
+      <span class="battle-meta"></span>
+    `;
+    btn.dataset.enhanced = "true";
+  }
+  const iconEl = btn.querySelector(".battle-icon");
+  const titleEl = btn.querySelector(".battle-title");
+  const summaryEl = btn.querySelector(".battle-summary");
+  const metaEl = btn.querySelector(".battle-meta");
+  btn.classList.toggle("is-locked", !!move.locked);
+  if (move.locked) {
+    btn.disabled = true;
+    btn.title = move.hint ?? "Locked ability";
+    iconEl.textContent = move.icon ?? "🔒";
+    titleEl.textContent = move.label ?? "Locked";
+    summaryEl.textContent = move.hint ?? "Unlock this ability later.";
+    metaEl.textContent = "";
+    return;
+  }
   btn.disabled = false;
-  const chance = Math.round(move.hit * 100);
-  btn.innerHTML = `<span class="move-title">${move.label}</span><span class="move-detail">${chance}% • ${move.dmg[0]}-${move.dmg[1]} dmg</span>`;
+  btn.title = move.summary ?? move.label ?? "Attack";
+  iconEl.textContent = move.icon ?? "⚔️";
+  titleEl.textContent = move.label ?? "Attack";
+  summaryEl.textContent = move.summary ?? "";
+  const chance = Math.round((move.hit ?? 0) * 100);
+  if (Array.isArray(move.dmg)) {
+    metaEl.textContent = `${chance}% | ${move.dmg[0]}-${move.dmg[1]} dmg`;
+  } else {
+    metaEl.textContent = `${chance}% chance`;
+  }
 }
 function applySeed(seed) {
   worldSeed = seed >>> 0;
@@ -680,6 +943,7 @@ function applySeed(seed) {
     hud.seed.textContent = `0x${worldSeed.toString(16).padStart(8, "0")}`;
 }
 function focusCameraImmediate() {
+  syncPlayerRender();
   camera.targetX = player.x + player.w / 2 - CANVAS_W / 2;
   camera.targetY = player.y + player.h / 2 - CANVAS_H / 2;
   camera.x = camera.targetX;
@@ -692,59 +956,139 @@ function focusCameraImmediate() {
   lastMiniPlayer = { x: player.lastTileX, y: player.lastTileY };
   minimapDirty = true;
 }
-function placePlayerOnTile(tx, ty) {
+function placePlayerOnTile(tx, ty, options = {}) {
+  const { snapCamera = false, syncRender = false } = options;
   player.lastTileX = tx;
   player.lastTileY = ty;
   player.x = (tx + 0.5) * TILE_SIZE - player.w / 2;
   player.y = (ty + 0.5) * TILE_SIZE - player.h / 2;
-  focusCameraImmediate();
+  if (snapCamera) {
+    syncPlayerRender();
+    focusCameraImmediate();
+  } else {
+    if (syncRender) syncPlayerRender();
+    camera.targetX = player.renderX + player.w / 2 - CANVAS_W / 2;
+    camera.targetY = player.renderY + player.h / 2 - CANVAS_H / 2;
+  }
   refreshAccessibility();
 }
 function spawnPlayerRandom() {
   const spawn = pickRandomGrassSpawn(map, worldSeed);
-  placePlayerOnTile(spawn.x, spawn.y);
+  placePlayerOnTile(spawn.x, spawn.y, { snapCamera: true });
+}
+function enemyAtTile(tx, ty) {
+  return enemies.find(
+    (enemy) => enemy.alive && enemy.tileX === tx && enemy.tileY === ty
+  );
+}
+function setEnemyWorldPosition(enemy, options = {}) {
+  const { syncRender = false } = options;
+  enemy.x = enemy.tileX * TILE_SIZE + (TILE_SIZE - enemy.w) / 2;
+  enemy.y = enemy.tileY * TILE_SIZE + (TILE_SIZE - enemy.h) / 2;
+  if (
+    syncRender ||
+    enemy.renderX == null ||
+    Number.isNaN(enemy.renderX) ||
+    enemy.renderY == null ||
+    Number.isNaN(enemy.renderY)
+  ) {
+    enemy.renderX = enemy.x;
+    enemy.renderY = enemy.y;
+  }
+}
+function performPlayerTurn(dx, dy) {
+  if (!dx && !dy) return false;
+  if (gameState !== "playing" || activeBattle) return false;
+  if (player.lastTileX == null || player.lastTileY == null) return false;
+  const targetX = player.lastTileX + dx;
+  const targetY = player.lastTileY + dy;
+  if (targetX < 0 || targetY < 0 || targetX >= MAP_W || targetY >= MAP_H) {
+    return false;
+  }
+  const blockingEnemy = enemyAtTile(targetX, targetY);
+  if (blockingEnemy) {
+    startBattle(blockingEnemy);
+    return true;
+  }
+  const targetTile = tileAt(targetX, targetY);
+  if (!isPassableTile(targetTile)) return false;
+  placePlayerOnTile(targetX, targetY);
+  const onCoin = coinAtTile(targetX, targetY);
+  if (onCoin) {
+    onCoin.collected = true;
+    coins += 1;
+    const center = tileCenter(targetX, targetY);
+    spawnCoinFloater(1, {
+      worldX: center.x,
+      worldY: center.y - TILE_SIZE * 0.2,
+    });
+    updateHUD();
+  }
+  stats.steps++;
+  lastMiniPlayer = { x: targetX, y: targetY };
+  minimapDirty = true;
+  if (targetTile === TILE.GRASS || targetTile === TILE.SAND) {
+    playFootstep(targetTile);
+  }
+  const ctx = resumeAudio();
+  startAmbientMusic(ctx);
+  if (!takeEnemyTurn()) {
+    updateHUD();
+    updateMinimap();
+  }
+  return true;
 }
 // === Movement & Collision (tile AABB) ========================================
 function update(dt) {
-  if (gameState !== "playing") {
-    return;
+  updateFloaters(dt);
+  if (!map || gameState !== "playing") return;
+  if (moveQueue.length && gameState === "playing") {
+    const move = moveQueue.shift();
+    if (move && performPlayerTurn(move.dx, move.dy)) {
+      holdElapsed = 0;
+    }
+  } else if (heldMoveKey) {
+    holdElapsed += dt;
+    if (holdElapsed >= MOVE_HOLD_DELAY) {
+      holdElapsed = 0;
+      const heldMove = MOVE_KEYS[heldMoveKey];
+      if (heldMove) moveQueue.push(heldMove);
+    }
   }
-  if (!map) return;
-  // input vector
-  let vx = 0,
-    vy = 0;
-  if (keys["arrowleft"] || keys["a"]) vx -= 1;
-  if (keys["arrowright"] || keys["d"]) vx += 1;
-  if (keys["arrowup"] || keys["w"]) vy -= 1;
-  if (keys["arrowdown"] || keys["s"]) vy += 1;
-  if (vx && vy) {
-    const inv = 1 / Math.sqrt(2);
-    vx *= inv;
-    vy *= inv;
-  }
-  const spd = player.speed;
-  let nx = player.x + vx * spd * dt;
-  let ny = player.y + vy * spd * dt;
-  // Resolve X then Y against solid tiles
-  nx = collideAxis(player, nx, player.y, "x");
-  ny = collideAxis(player, nx, ny, "y"); // note: use nx for x already resolved
-  // commit
-  player.x = nx;
-  player.y = ny;
-  // steps: when changing tile
-  const tx = Math.floor((player.x + player.w / 2) / TILE_SIZE);
-  const ty = Math.floor((player.y + player.h / 2) / TILE_SIZE);
-  if (tx !== player.lastTileX || ty !== player.lastTileY) {
-    stats.steps++;
-    player.lastTileX = tx;
-    player.lastTileY = ty;
-    minimapDirty = true;
-    const stepped = tileAt(tx, ty);
-    if (stepped === TILE.GRASS || stepped === TILE.SAND) playFootstep(stepped);
+  player.renderX = smoothTowards(
+    player.renderX,
+    player.x,
+    PLAYER_RENDER_LERP,
+    dt
+  );
+  player.renderY = smoothTowards(
+    player.renderY,
+    player.y,
+    PLAYER_RENDER_LERP,
+    dt
+  );
+  for (const enemy of enemies) {
+    if (!enemy.alive) continue;
+    const targetX = enemy.x ?? 0;
+    const targetY = enemy.y ?? 0;
+    if (enemy.renderX == null) enemy.renderX = targetX;
+    if (enemy.renderY == null) enemy.renderY = targetY;
+    enemy.renderX = smoothTowards(
+      enemy.renderX,
+      targetX,
+      ENEMY_RENDER_LERP,
+      dt
+    );
+    enemy.renderY = smoothTowards(
+      enemy.renderY,
+      targetY,
+      ENEMY_RENDER_LERP,
+      dt
+    );
   }
   // camera easing toward player
-  camera.targetX = player.x + player.w / 2 - CANVAS_W / 2;
-  camera.targetY = player.y + player.h / 2 - CANVAS_H / 2;
+  camera.targetX = player.renderX + player.w / 2 - CANVAS_W / 2;
+  camera.targetY = player.renderY + player.h / 2 - CANVAS_H / 2;
   const dx = camera.targetX - camera.x;
   const dy = camera.targetY - camera.y;
   const maxStep = CAMERA_MAX_SPEED * dt;
@@ -757,8 +1101,6 @@ function update(dt) {
     lastMiniCamera = { x: camTileX, y: camTileY };
     minimapDirty = true;
   }
-  updateEnemies(dt);
-  if (gameState === "battle") return;
   // time + throttled autosave
   stats.playTimeMs += dt * 1000;
   accTimeForSave += dt * 1000;
@@ -767,107 +1109,94 @@ function update(dt) {
     accTimeForSave = 0;
   }
   updateHUD();
-  if (tx !== lastMiniPlayer.x || ty !== lastMiniPlayer.y) {
-    lastMiniPlayer = { x: tx, y: ty };
+  if (
+    player.lastTileX !== lastMiniPlayer.x ||
+    player.lastTileY !== lastMiniPlayer.y
+  ) {
+    lastMiniPlayer = {
+      x: player.lastTileX ?? Math.floor((player.x + player.w / 2) / TILE_SIZE),
+      y: player.lastTileY ?? Math.floor((player.y + player.h / 2) / TILE_SIZE),
+    };
     minimapDirty = true;
   }
   updateMinimap();
 }
-function collideAxis(p, nx, ny, axis) {
-  const px = axis === "x" ? nx : p.x;
-  const py = axis === "y" ? ny : p.y;
-  const halfW = p.w / 2,
-    halfH = p.h / 2;
-  // bbox corners (centered inside tile)
-  const cx = px + halfW,
-    cy = py + halfH;
-  const left = Math.floor((cx - halfW) / TILE_SIZE);
-  const right = Math.floor((cx + halfW) / TILE_SIZE);
-  const top = Math.floor((cy - halfH) / TILE_SIZE);
-  const bottom = Math.floor((cy + halfH) / TILE_SIZE);
-  for (let ty = top; ty <= bottom; ty++) {
-    for (let tx = left; tx <= right; tx++) {
-      if (isSolid(tileAt(tx, ty))) {
-        // compute tile rect
-        const rx = tx * TILE_SIZE,
-          ry = ty * TILE_SIZE;
-        const rw = TILE_SIZE,
-          rh = TILE_SIZE;
-        // simple resolution along the moving axis
-        if (axis === "x") {
-          if (p.x + p.w <= rx && nx + p.w > rx) nx = rx - p.w; // moving right, hit left face
-          if (p.x >= rx + rw && nx < rx + rw) nx = rx + rw; // moving left, hit right face
-        } else {
-          if (p.y + p.h <= ry && ny + p.h > ry) ny = ry - p.h; // moving down, hit top face
-          if (p.y >= ry + rh && ny < ry + rh) ny = ry + rh; // moving up, hit bottom face
-        }
-      }
-    }
-  }
-  return axis === "x" ? nx : ny;
-}
-function moveActor(actor, vx, vy, dt) {
-  if (!vx && !vy) return;
-  let nx = actor.x + vx * dt;
-  let ny = actor.y + vy * dt;
-  nx = collideAxis(actor, nx, actor.y, "x");
-  ny = collideAxis(actor, nx, ny, "y");
-  actor.x = nx;
-  actor.y = ny;
-}
-function updateEnemies(dt) {
-  const px = player.x + player.w / 2;
-  const py = player.y + player.h / 2;
+function takeEnemyTurn() {
+  if (gameState !== "playing") return false;
+  if (player.lastTileX == null || player.lastTileY == null) return false;
+  const occupied = new Set();
   for (const enemy of enemies) {
     if (!enemy.alive || enemy.state === "battle") continue;
-    const ex = enemy.x + enemy.w / 2;
-    const ey = enemy.y + enemy.h / 2;
-    const dist = Math.hypot(ex - px, ey - py);
-    const detection = enemy.detectionRadius ?? ENEMY_AGGRO_DISTANCE_BASE;
-    if (dist <= detection) {
-      enemy.state = "chase";
-    } else if (enemy.state === "chase" && dist > detection * 1.8) {
-      enemy.state = "wander";
-      enemy.wanderTimer = 0;
-    }
-    let vx = 0,
-      vy = 0;
-    if (enemy.state === "chase") {
-      const len = Math.max(dist, 0.0001);
-      vx = ((px - ex) / len) * enemy.speed;
-      vy = ((py - ey) / len) * enemy.speed;
-    } else {
-      enemy.wanderTimer -= dt;
-      if (enemy.wanderTimer <= 0) {
-        enemy.wanderTimer = randRange(
-          ENEMY_WANDER_INTERVAL.min,
-          ENEMY_WANDER_INTERVAL.max
-        );
-        if (Math.random() < 0.35) {
-          enemy.dirX = 0;
-          enemy.dirY = 0;
-        } else {
-          const angle = Math.random() * Math.PI * 2;
-          enemy.dirX = Math.cos(angle);
-          enemy.dirY = Math.sin(angle);
-        }
+    occupied.add(tileKey(enemy.tileX, enemy.tileY));
+  }
+  occupied.add(tileKey(player.lastTileX, player.lastTileY));
+  let movedAny = false;
+  for (const enemy of enemies) {
+    if (!enemy.alive || enemy.state === "battle") continue;
+    const currentKey = tileKey(enemy.tileX, enemy.tileY);
+    occupied.delete(currentKey);
+    const dx = player.lastTileX - enemy.tileX;
+    const dy = player.lastTileY - enemy.tileY;
+    const distance = Math.abs(dx) + Math.abs(dy);
+    const detectionTiles = Math.max(
+      1,
+      Math.floor(
+        (enemy.detectionRadius ?? ENEMY_AGGRO_DISTANCE_BASE) / TILE_SIZE
+      )
+    );
+    const candidates = [];
+    if (distance > 0 && distance <= detectionTiles) {
+      if (Math.abs(dx) >= Math.abs(dy)) {
+        candidates.push({ dx: Math.sign(dx), dy: 0 });
+        if (dy) candidates.push({ dx: 0, dy: Math.sign(dy) });
+      } else {
+        candidates.push({ dx: 0, dy: Math.sign(dy) });
+        if (dx) candidates.push({ dx: Math.sign(dx), dy: 0 });
       }
-      vx = enemy.dirX * enemy.speed * 0.4;
-      vy = enemy.dirY * enemy.speed * 0.4;
     }
-    moveActor(enemy, vx, vy, dt);
-    const nx = enemy.x + enemy.w / 2;
-    const ny = enemy.y + enemy.h / 2;
-    const newDist = Math.hypot(nx - px, ny - py);
-    if (newDist <= ENEMY_COLLIDE_DISTANCE + Math.max(player.w, player.h) / 2) {
-      startBattle(enemy);
-      return;
+    for (const dir of shuffledCardinalDirs()) {
+      if (!candidates.some((c) => c.dx === dir.dx && c.dy === dir.dy)) {
+        candidates.push(dir);
+      }
+    }
+    let moved = false;
+    for (const dir of candidates) {
+      const tx = enemy.tileX + dir.dx;
+      const ty = enemy.tileY + dir.dy;
+      if (tx === enemy.tileX && ty === enemy.tileY) continue;
+      if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) continue;
+      const key = tileKey(tx, ty);
+      if (tx === player.lastTileX && ty === player.lastTileY) {
+        enemy.tileX = tx;
+        enemy.tileY = ty;
+        setEnemyWorldPosition(enemy);
+        startBattle(enemy);
+        return true;
+      }
+      const tile = tileAt(tx, ty);
+      if (!isPassableTile(tile)) continue;
+      if (accessibleTiles.size && !accessibleTiles.has(key)) continue;
+      if (occupied.has(key)) continue;
+      enemy.tileX = tx;
+      enemy.tileY = ty;
+      setEnemyWorldPosition(enemy);
+      occupied.add(key);
+      moved = true;
+      movedAny = true;
+      break;
+    }
+    if (!moved) {
+      occupied.add(currentKey);
+      setEnemyWorldPosition(enemy);
     }
   }
+  if (movedAny) minimapDirty = true;
+  return false;
 }
 function startBattle(enemy) {
   if (!enemy || gameState !== "playing") return;
   clearMovementKeys();
+  battlePaused = false;
   playBattleSound("start");
   enemy.battleHp = enemy.maxHp;
   activeBattle = {
@@ -881,6 +1210,7 @@ function startBattle(enemy) {
   };
   enemy.state = "battle";
   gameState = "battle";
+  updateGameMusicVolume();
   battleUI.root?.classList.remove("is-hidden");
   battleUI.continue?.classList.add("is-hidden");
   battleUI.playerSprite?.classList.remove(
@@ -1006,10 +1336,14 @@ function updateBattleUI() {
 }
 async function handleBattleMove(index) {
   if (!activeBattle || activeBattle.busy || activeBattle.result) return;
+  const move = BATTLE_MOVES[index];
+  if (!move || move.locked) {
+    flash(move?.hint ?? "That ability is not available yet.");
+    return;
+  }
   activeBattle.busy = true;
   if (battleUI.buttons)
     battleUI.buttons.forEach((btn) => (btn.disabled = true));
-  const move = BATTLE_MOVES[index] ?? BATTLE_MOVES[0];
   const enemyDefeated = await performPlayerAttack(move);
   if (!activeBattle || activeBattle.result || enemyDefeated) return;
   await wait(420);
@@ -1021,9 +1355,22 @@ async function handleBattleMove(index) {
   if (battleUI.buttons)
     battleUI.buttons.forEach((btn) => (btn.disabled = false));
 }
+function pauseBattleToMenu(message = "Battle paused") {
+  if (!activeBattle || activeBattle.result) {
+    showMenu(message);
+    return;
+  }
+  if (activeBattle.busy) return;
+  battlePaused = true;
+  battleUI.root?.classList.add("is-hidden");
+  battleUI.continue?.classList.add("is-hidden");
+  showMenu(message);
+}
 function finishBattle(result) {
   if (!activeBattle) return;
+  battlePaused = false;
   activeBattle.result = result;
+  updateGameMusicVolume();
   activeBattle.busy = false;
   clearMovementKeys();
   playBattleSound(result === "victory" ? "victory" : "defeat");
@@ -1037,6 +1384,7 @@ function finishBattle(result) {
 }
 function handleBattleContinue() {
   if (!activeBattle) return;
+  battlePaused = false;
   const { enemy, result } = activeBattle;
   clearMovementKeys();
   if (battleUI.buttons)
@@ -1048,9 +1396,27 @@ function handleBattleContinue() {
     if (enemy) enemy.alive = false;
     enemies = enemies.filter((e) => e.alive);
     score += 100;
+    const reward = randInt(COIN_REWARD[0], COIN_REWARD[1]);
+    coins += reward;
+    const playerTileX =
+      player.lastTileX ??
+      Math.floor((player.x + player.w / 2) / TILE_SIZE);
+    const playerTileY =
+      player.lastTileY ??
+      Math.floor((player.y + player.h / 2) / TILE_SIZE);
+    const center = tileCenter(playerTileX, playerTileY);
+    spawnCoinFloater(reward, {
+      worldX: center.x,
+      worldY: center.y - TILE_SIZE * 0.2,
+      color: "#ffb347",
+    });
+    flash(
+      `Looted ${reward} coin${reward === 1 ? "" : "s"}!`
+    );
     updateHUD();
     saveState();
     activeBattle = null;
+    updateGameMusicVolume();
     if (aliveEnemiesCount() === 0) {
       advanceLevel();
       return;
@@ -1062,6 +1428,9 @@ function handleBattleContinue() {
   // defeat
   level = 1;
   score = 0;
+  coins = 0;
+  groundCoins = [];
+
   stats = { steps: 0, playTimeMs: 0 };
   enemies = [];
   map = null;
@@ -1072,6 +1441,8 @@ function handleBattleContinue() {
   player.lastTileY = null;
   localStorage.removeItem(STORAGE_KEY);
   savedSnapshot = null;
+  battlePaused = false;
+  floaters = [];
   if (hud.world) hud.world.textContent = "--";
   if (hud.seed) hud.seed.textContent = "--";
   clearMovementKeys();
@@ -1079,21 +1450,72 @@ function handleBattleContinue() {
   updateMenuButtons();
   showMenu("You were defeated! Start a new adventure.");
   playMenuMusic();
+  updateGameMusicVolume();
 }
 function advanceLevel() {
+  const clearedLevel = level;
   level += 1;
-  flash(`Level ${level}! More foes approach.`);
+  updateHUD();
   const nextSeed = (Math.random() * 2 ** 32) | 0;
-  startFreshGame(nextSeed, {
-    preserveScore: true,
-    preserveLevel: true,
-    levelOverride: level,
-    scoreOverride: score,
-    statsOverride: stats,
-    enemyCount: enemiesForLevel(level),
-  });
+  pendingLevelConfig = {
+    seed: nextSeed,
+    options: {
+      preserveScore: true,
+      preserveLevel: true,
+      levelOverride: level,
+      scoreOverride: score,
+      statsOverride: { ...stats },
+      enemyCount: enemiesForLevel(level),
+    },
+  };
+  flash(`Level ${clearedLevel} cleared!`);
+  showLevelUpScreen(clearedLevel, level);
 }
 // === Render ==================================================================
+function renderFloaters() {
+  if (!floaters.length || !ctx) return;
+  ctx.save();
+  ctx.font = "16px 'Segoe UI', sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.shadowColor = "rgba(0,0,0,0.5)";
+  ctx.shadowBlur = 6;
+  for (const floater of floaters) {
+    const progress = Math.min(1, floater.age / floater.life);
+    const alpha = 1 - progress;
+    const rise = progress * FLOATER_RISE;
+    const screenX = Math.floor(floater.x - camera.x);
+    const screenY = Math.floor(floater.y - camera.y - rise);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = floater.color;
+    ctx.strokeStyle = "rgba(0,0,0,0.5)";
+    ctx.lineWidth = 3;
+    const iconImg =
+      floater.icon && images[floater.icon] ? images[floater.icon] : null;
+    if (iconImg) {
+      const baseIcon = iconImg.width || 16;
+      const iconSize = Math.round(baseIcon * 1.5);
+      const spacing = 6;
+      const metrics = ctx.measureText(floater.text);
+      const totalWidth = iconSize + spacing + metrics.width;
+      const baseX = screenX - totalWidth / 2;
+      const iconX = Math.floor(baseX);
+      const iconY = Math.floor(screenY - iconSize / 2);
+      ctx.drawImage(iconImg, iconX, iconY, iconSize, iconSize);
+      const textX = baseX + iconSize + spacing;
+      ctx.save();
+      ctx.textAlign = "left";
+      ctx.strokeText(floater.text, textX, screenY);
+      ctx.fillText(floater.text, textX, screenY);
+      ctx.restore();
+    } else {
+      ctx.strokeText(floater.text, screenX, screenY);
+      ctx.fillText(floater.text, screenX, screenY);
+    }
+  }
+  ctx.restore();
+  ctx.globalAlpha = 1;
+}
 function render() {
   ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
   if (!map) return;
@@ -1113,9 +1535,30 @@ function render() {
       ctx.drawImage(img, sx, sy, TILE_SIZE, TILE_SIZE);
     }
   }
+  const cimg = images[COIN_IMG];
+  if (cimg) {
+    const drawSize = coinDrawSize();
+    for (const c of groundCoins) {
+      if (c.collected) continue;
+      const wx = c.tileX * TILE_SIZE + (TILE_SIZE - drawSize) / 2;
+      const wy = c.tileY * TILE_SIZE + (TILE_SIZE - drawSize) / 2;
+      const { x: sx, y: sy } = worldToScreen(wx, wy);
+      // culling
+      if (
+        sx + drawSize < 0 ||
+        sy + drawSize < 0 ||
+        sx > CANVAS_W ||
+        sy > CANVAS_H
+      )
+        continue;
+      ctx.drawImage(cimg, sx, sy, drawSize, drawSize);
+    }
+  }
   for (const enemy of enemies) {
     if (!enemy.alive) continue;
-    const es = worldToScreen(enemy.x, enemy.y);
+    const drawX = enemy.renderX ?? enemy.x ?? 0;
+    const drawY = enemy.renderY ?? enemy.y ?? 0;
+    const es = worldToScreen(drawX, drawY);
     const offset = (TILE_SIZE - enemy.w) / 2;
     const eimg = images[enemy.sprite];
     if (eimg) {
@@ -1127,7 +1570,7 @@ function render() {
   }
   // player
   const pimg = images["assets/player.png"];
-  const ps = worldToScreen(player.x, player.y);
+  const ps = worldToScreen(player.renderX, player.renderY);
   if (pimg) {
     const offset = (TILE_SIZE - player.w) / 2;
     ctx.drawImage(pimg, ps.x - offset, ps.y - offset, TILE_SIZE, TILE_SIZE);
@@ -1136,6 +1579,7 @@ function render() {
     const offset = (TILE_SIZE - player.w) / 2;
     ctx.fillRect(ps.x - offset, ps.y - offset, TILE_SIZE, TILE_SIZE);
   }
+  renderFloaters();
 }
 
 // === Minimap =================================================================
@@ -1165,10 +1609,8 @@ function updateMinimap() {
   minimapCtx.fillStyle = "#f25f5c";
   for (const enemy of enemies) {
     if (!enemy.alive || enemy.state === "battle") continue;
-    const ex =
-      Math.floor((enemy.x + enemy.w / 2) / TILE_SIZE) * MINIMAP_SCALE_X;
-    const ey =
-      Math.floor((enemy.y + enemy.h / 2) / TILE_SIZE) * MINIMAP_SCALE_Y;
+    const ex = enemy.tileX * MINIMAP_SCALE_X;
+    const ey = enemy.tileY * MINIMAP_SCALE_Y;
     minimapCtx.fillRect(ex, ey, dotW, dotH);
   }
   const camX =
@@ -1196,12 +1638,43 @@ function updateMenuButtons() {
   if (!menu.continue) return;
   const canResumeCurrent = !!map && player.lastTileX !== null;
   const hasSave = !!savedSnapshot;
-  menu.continue.textContent = canResumeCurrent ? "Resume" : "Continue";
-  menu.continue.disabled = !(canResumeCurrent || hasSave);
+  const hasPendingLevel = !!pendingLevelConfig;
+  const battleResume = battlePaused && activeBattle && !activeBattle.result;
+  if (hasPendingLevel) {
+    menu.continue.textContent = "Next Level";
+    menu.continue.disabled = false;
+  } else if (battleResume) {
+    menu.continue.textContent = "Resume Battle";
+    menu.continue.disabled = false;
+  } else if (canResumeCurrent) {
+    menu.continue.textContent = "Resume";
+    menu.continue.disabled = false;
+  } else {
+    menu.continue.textContent = "Continue";
+    menu.continue.disabled = !hasSave;
+  }
+}
+function hideLevelUpScreen() {
+  levelUpUI.root?.classList.add("is-hidden");
+  stopLevelUpMusic();
+}
+function showLevelUpScreen(clearedLevel, nextLevel) {
+  gameState = "menu";
+  clearMovementKeys();
+  stopAmbientMusic();
+  if (levelUpUI.msg) {
+    levelUpUI.msg.textContent = `Level ${clearedLevel} cleared! Ready for level ${nextLevel}?`;
+  }
+  menu.root?.classList.add("is-hidden");
+  levelUpUI.root?.classList.remove("is-hidden");
+  playLevelUpMusic();
+  updateMenuButtons();
 }
 function showMenu(message = "") {
   gameState = "menu";
   for (const key of Object.keys(keys)) keys[key] = false;
+  floaters = [];
+  hideLevelUpScreen();
   menu.root?.classList.remove("is-hidden");
   battleUI.continue?.classList.add("is-hidden");
   battleUI.root?.classList.add("is-hidden");
@@ -1213,13 +1686,37 @@ function showMenu(message = "") {
     menu.seedInput.select();
   }
   playMenuMusic();
+  warmStartMenuMusic();
 }
 function hideMenu() {
   menu.root?.classList.add("is-hidden");
   setMenuMessage("");
 }
+function proceedToNextLevel() {
+  if (!pendingLevelConfig) {
+    hideLevelUpScreen();
+    playGameMusic();
+    return;
+  }
+  const { seed, options } = pendingLevelConfig;
+  pendingLevelConfig = null;
+  hideLevelUpScreen();
+  battlePaused = false;
+  startFreshGame(seed, options);
+}
 function enterGame() {
   hideMenu();
+  if (battlePaused && activeBattle && !activeBattle.result) {
+    battlePaused = false;
+    gameState = "battle";
+    battleUI.root?.classList.remove("is-hidden");
+    battleUI.continue?.classList.add("is-hidden");
+    updateBattleUI();
+    prevTs = performance.now();
+    updateGameMusicVolume();
+    playGameMusic();
+    return;
+  }
   gameState = "playing";
   prevTs = performance.now();
   updateHUD();
@@ -1236,9 +1733,14 @@ function startFreshGame(seed, opts = {}) {
     statsOverride,
     enemyCount,
   } = opts;
+  pendingLevelConfig = null;
+  hideLevelUpScreen();
+  battlePaused = false;
   const ctx = resumeAudio();
   startAmbientMusic(ctx);
   playGameMusic();
+  floaters = [];
+  coins = preserveScore ? coins : 0;
   level = preserveLevel ? levelOverride ?? level : levelOverride ?? 1;
   score = preserveScore ? scoreOverride ?? score : scoreOverride ?? 0;
   if (statsOverride) {
@@ -1252,6 +1754,7 @@ function startFreshGame(seed, opts = {}) {
   applySeed(seed);
   spawnPlayerRandom();
   spawnEnemies(enemyCount ?? enemiesForLevel(level));
+  spawnGroundCoins();
   focusCameraImmediate();
   accTimeForSave = 0;
   savedSnapshot = null;
@@ -1262,11 +1765,18 @@ function startFreshGame(seed, opts = {}) {
   enterGame();
   saveState();
 }
+
 function resumeFromSnapshot(snapshot) {
   if (!snapshot) return false;
+  pendingLevelConfig = null;
+  hideLevelUpScreen();
+  battlePaused = false;
+  floaters = [];
   const ctx = resumeAudio();
   startAmbientMusic(ctx);
   playGameMusic();
+  battlePaused = false;
+  floaters = [];
 
   const seed = snapshot.seed ?? (Math.random() * 2 ** 32) | 0;
   applySeed(seed);
@@ -1280,17 +1790,29 @@ function resumeFromSnapshot(snapshot) {
   player.y = savedPlayer.y;
   player.lastTileX = Math.floor((player.x + player.w / 2) / TILE_SIZE);
   player.lastTileY = Math.floor((player.y + player.h / 2) / TILE_SIZE);
+  syncPlayerRender();
   stats = {
     steps: snapshot.stats?.steps ?? 0,
     playTimeMs: snapshot.stats?.playTimeMs ?? 0,
   };
   settings = { mute: false, ...settings, ...snapshot.settings };
+  coins = snapshot.coins ?? 0;
+  groundCoins = Array.isArray(snapshot.groundCoins)
+    ? snapshot.groundCoins.map((c) => ({ ...c }))
+    : [];
+
   refreshAccessibility();
   if (Array.isArray(snapshot.enemies) && snapshot.enemies.length) {
     restoreEnemies(snapshot.enemies);
   } else {
     spawnEnemies(enemiesForLevel(level));
   }
+  if (Array.isArray(snapshot.groundCoins)) {
+    groundCoins = snapshot.groundCoins.map((c) => ({ ...c }));
+  } else {
+    spawnGroundCoins();
+  }
+  coins = snapshot.coins ?? 0;
   focusCameraImmediate();
   accTimeForSave = 0;
   updateMuteButton();
@@ -1359,29 +1881,7 @@ function playFootstep(tile) {
   osc.start(now);
   osc.stop(now + preset.duration);
 }
-function playAmbientChirp(ctx, gain) {
-  const duration = 0.35 + Math.random() * 0.25;
-  const buffer = ctx.createBuffer(
-    1,
-    Math.floor(ctx.sampleRate * duration),
-    ctx.sampleRate
-  );
-  const data = buffer.getChannelData(0);
-  const startFreq = 200 + Math.random() * 240;
-  const endFreq = startFreq * (1.4 + Math.random() * 0.6);
-  for (let i = 0; i < data.length; i++) {
-    const t = i / ctx.sampleRate;
-    const progress = t / duration;
-    const freq = startFreq + (endFreq - startFreq) * Math.pow(progress, 0.85);
-    const envelope = Math.pow(1 - progress, 2);
-    data[i] = Math.sin(2 * Math.PI * freq * t) * envelope * 0.9;
-  }
-  const source = ctx.createBufferSource();
-  source.buffer = buffer;
-  source.playbackRate.value = 0.95 + Math.random() * 0.1;
-  source.connect(gain);
-  source.start();
-}
+
 function startAmbientMusic(ctx = audioCtx) {
   if (settings.mute) return;
   if (!ctx) return;
@@ -1391,7 +1891,6 @@ function startAmbientMusic(ctx = audioCtx) {
   ambientMusic.gain.connect(ctx.destination);
   const schedule = () => {
     if (!ambientMusic.gain) return;
-    playAmbientChirp(ctx, ambientMusic.gain);
     const interval = 2200 + Math.random() * 2200;
     ambientMusic.timer = setTimeout(schedule, interval);
   };
@@ -1463,17 +1962,36 @@ function playBattleSound(type) {
 
 // === Music (menu & game) =====================================================
 function setupMusic() {
-  music.menu = new Audio(
-    "https://www.fesliyanstudios.com/musicfiles/2019-01-02_-_8_Bit_Menu_-_David_Renda_-_FesliyanStudios.com.mp3"
-  );
-  music.game = new Audio(
-    "https://www.fesliyanstudios.com/musicfiles/2021-08-16_-_8_Bit_Adventure_-_www.FesliyanStudios.com/fast-2021-08-16_-_8_Bit_Adventure_-_www.FesliyanStudios.com.mp3"
-  );
-  [music.menu, music.game].forEach((a) => {
-    a.loop = true;
-    a.volume = 0.4; // tweak to taste
-  });
+  music.menu = new Audio("./assets/audio/menu-music.mp3");
+  music.game = new Audio("./assets/audio/game.mp3");
+  music.levelUp = new Audio("./assets/audio/next-level.mp3");
+  if (music.menu) {
+    music.menu.loop = true;
+    music.menu.volume = MENU_MUSIC_VOLUME;
+  }
+  if (music.game) {
+    music.game.loop = true;
+    music.game.volume = GAME_MUSIC_VOLUME;
+  }
+  if (music.levelUp) {
+    music.levelUp.loop = false;
+    music.levelUp.volume = LEVEL_MUSIC_VOLUME;
+  }
+  for (const track of [music.menu, music.game, music.levelUp]) {
+    if (!track) continue;
+    track.preload = "auto";
+    track.autoplay = false;
+    track.playsInline = true;
+    track.crossOrigin = "anonymous";
+    if (typeof track.load === "function") {
+      try {
+        track.load();
+      } catch {}
+    }
+  }
   updateMusicMute();
+  updateGameMusicVolume();
+  warmStartMenuMusic();
 }
 
 function unlockAudioOnce() {
@@ -1484,9 +2002,22 @@ function unlockAudioOnce() {
   resumeAudio();
   updateMusicMute();
 
-  // If we're on the menu at first load, start menu music now
-  if (gameState === "menu") {
-    playMenuMusic();
+  // If menu music is warm-started muted, unmute & set proper volume
+  if (music.menu) {
+    if (gameState === "menu") {
+      music.current = music.menu;
+      music.menu.muted = false;
+      music.menu.volume = MENU_MUSIC_VOLUME;
+      // ensure it’s playing
+      music.menu.play().catch(() => {
+        /* ignore */
+      });
+    } else {
+      // not on menu, stop any menu playback
+      if (!settings.mute) {
+        stopMusic();
+      }
+    }
   }
 
   // remove listeners once unlocked
@@ -1506,26 +2037,121 @@ function playMenuMusic() {
   if (!music.menu) return;
   stopAmbientMusic();
   if (settings.mute) return;
-  stopMusic();
-  music.current = music.menu;
-  music.current.play().catch(() => {});
+  const attemptPlay = () => {
+    stopMusic();
+    music.current = music.menu;
+    music.menu.currentTime = 0;
+    music.menu.volume = MENU_MUSIC_VOLUME;
+    music.menu.muted = false;
+    const promise = music.menu.play();
+    if (promise && typeof promise.catch === "function") {
+      promise.catch(() => {
+        pendingMenuMusic = true;
+      });
+    }
+  };
+  if (!audioUnlocked) {
+    pendingMenuMusic = true;
+    attemptPlay();
+    return;
+  }
+  pendingMenuMusic = false;
+  attemptPlay();
 }
 
 function playGameMusic() {
   if (!music.game) return;
   stopAmbientMusic();
   if (settings.mute) return;
+  const attemptPlay = () => {
+    stopMusic();
+    music.current = music.game;
+    music.game.currentTime = 0;
+    updateGameMusicVolume();
+    music.game.muted = false;
+    const promise = music.game.play();
+    if (promise && typeof promise.catch === "function") {
+      promise.catch(() => {});
+    }
+  };
+  if (!audioUnlocked) {
+    pendingMenuMusic = false;
+    attemptPlay();
+    return;
+  }
+  pendingMenuMusic = false;
+  attemptPlay();
+}
+
+function playLevelUpMusic() {
+  if (!music.levelUp) return;
+  stopAmbientMusic();
+  if (settings.mute) return;
   stopMusic();
-  music.current = music.game;
+  music.current = music.levelUp;
+  music.levelUp.currentTime = 0;
+  music.levelUp.volume = LEVEL_MUSIC_VOLUME;
+  music.levelUp.muted = false;
   music.current.play().catch(() => {});
+}
+
+function stopLevelUpMusic() {
+  if (!music.levelUp) return;
+  music.levelUp.pause();
+  music.levelUp.currentTime = 0;
+  if (music.current === music.levelUp) {
+    music.current = null;
+  }
 }
 
 function updateMusicMute() {
   const muted = !!settings.mute;
-  [music.menu, music.game].forEach((a) => {
+  [music.menu, music.game, music.levelUp].forEach((a) => {
     if (a) a.muted = muted;
   });
-  if (muted) stopMusic();
+  if (muted) {
+    stopMusic();
+  } else {
+    if (music.menu) music.menu.volume = MENU_MUSIC_VOLUME;
+    if (music.levelUp) music.levelUp.volume = LEVEL_MUSIC_VOLUME;
+    updateGameMusicVolume();
+  }
+}
+
+function updateGameMusicVolume() {
+  if (!music.game) return;
+  const target =
+    activeBattle && !activeBattle.result
+      ? GAME_MUSIC_BATTLE_VOLUME
+      : GAME_MUSIC_VOLUME;
+  music.game.volume = target;
+}
+
+function warmStartMenuMusic() {
+  if (!music.menu || audioUnlocked) return;
+  if (music.current === music.menu && !music.menu.paused) return;
+
+  music.menu.muted = true;
+  music.menu.volume = 0;
+  music.menu.loop = true;
+  music.current = music.menu;
+  music.menu.currentTime = 0;
+  const playback = music.menu.play();
+  if (playback && typeof playback.then === "function") {
+    playback
+      .then(() => {
+        if (!audioUnlocked) {
+          pendingMenuMusic = false;
+          music.menu.muted = false;
+          music.menu.volume = MENU_MUSIC_VOLUME;
+        }
+      })
+      .catch(() => {
+        pendingMenuMusic = true;
+      });
+  } else {
+    pendingMenuMusic = true;
+  }
 }
 
 // === HUD =====================================================================
@@ -1533,6 +2159,7 @@ function updateHUD() {
   if (hud.level) hud.level.textContent = `${level}`;
   if (hud.score) hud.score.textContent = `${score}`;
   if (hud.enemies) hud.enemies.textContent = `${aliveEnemiesCount()}`;
+  if (hud.coins) hud.coins.textContent = Number(coins).toLocaleString();
   if (!map) {
     hud.txy.textContent = "--";
     hud.pxy.textContent = "--";
@@ -1541,8 +2168,10 @@ function updateHUD() {
     hud.time.textContent = `${Math.floor(stats.playTimeMs / 1000)}s`;
     return;
   }
-  const tx = Math.floor((player.x + player.w / 2) / TILE_SIZE);
-  const ty = Math.floor((player.y + player.h / 2) / TILE_SIZE);
+  const tx =
+    player.lastTileX ?? Math.floor((player.x + player.w / 2) / TILE_SIZE);
+  const ty =
+    player.lastTileY ?? Math.floor((player.y + player.h / 2) / TILE_SIZE);
   const t = tileAt(tx, ty);
   hud.txy.textContent = `${tx},${ty}`;
   hud.pxy.textContent = `${Math.floor(player.x)},${Math.floor(player.y)}`;
@@ -1579,12 +2208,17 @@ async function init() {
   if (hud.world) hud.world.textContent = "--";
   hud.seed = document.getElementById("worldSeed");
   if (hud.seed) hud.seed.textContent = "--";
+  hud.coins = document.getElementById("coins");
   menu.root = document.getElementById("menu");
   menu.seedInput = document.getElementById("menuSeed");
   menu.startRandom = document.getElementById("btnMenuStartRandom");
   menu.startSeed = document.getElementById("btnMenuStartSeed");
   menu.continue = document.getElementById("btnMenuContinue");
   menu.msg = document.getElementById("menuMsg");
+  levelUpUI.root = document.getElementById("levelUp");
+  levelUpUI.msg = document.getElementById("levelUpMsg");
+  levelUpUI.next = document.getElementById("btnLevelNext");
+  levelUpUI.next?.addEventListener("click", proceedToNextLevel);
   battleUI.root = document.getElementById("battle");
   battleUI.msg = document.getElementById("battleMsg");
   battleUI.playerSprite = document.getElementById("battlePlayerSprite");
@@ -1624,6 +2258,11 @@ async function init() {
     flash("New island!");
   });
   btnMenu?.addEventListener("click", () => {
+    if (gameState === "battle" && activeBattle && !activeBattle.result) {
+      pauseBattleToMenu();
+      updateMenuButtons();
+      return;
+    }
     showMenu();
     updateMenuButtons();
   });
@@ -1644,6 +2283,16 @@ async function init() {
     startFreshGame(seed);
   });
   menu.continue?.addEventListener("click", () => {
+    if (pendingLevelConfig) {
+      setMenuMessage("");
+      proceedToNextLevel();
+      return;
+    }
+    if (battlePaused && activeBattle && !activeBattle.result) {
+      setMenuMessage("");
+      enterGame();
+      return;
+    }
     if (map && player.lastTileX !== null) {
       setMenuMessage("");
       enterGame();
