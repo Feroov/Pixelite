@@ -10,34 +10,210 @@
     <link rel="preload" as="image" href="assets/tree.png" />
     <link rel="preload" as="image" href="assets/player.png" />
     <link rel="stylesheet" href="styles.css" />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css"
+    />
     <link rel="icon" href="./assets/logo.png" sizes="32x32" />
   </head>
   <body>
     <div class="wrap">
       <canvas id="game" width="640" height="480"> </canvas>
-      <canvas id="minimap" width="100" height="75" aria-hidden="true"></canvas>
       <div id="menu" class="menu">
         <div class="menu-panel">
-          <img class="menu-title" src="./assets/logo.png" alt="Pixelite Logo" />
-          <label class="menu-label" for="menuSeed"
-            >Seed (leave blank for random)</label
-          >
-          <input
-            id="menuSeed"
-            type="text"
-            autocomplete="off"
-            spellcheck="false"
-          />
-          <div class="menu-buttons">
-            <button id="btnMenuStartRandom">Start Random Island</button>
-            <button id="btnMenuStartSeed">Start With Seed</button>
-            <button id="btnMenuContinue" disabled>Continue</button>
+          <div class="menu-header">
+            <img
+              class="menu-logo"
+              src="./assets/logo.png"
+              alt="Pixelite Logo"
+            />
+            <div class="menu-tagline">
+              A handcrafted micro-RPG to explore at your own pace.
+            </div>
           </div>
-          <div id="menuMsg" class="menu-msg"></div>
+          <div class="menu-body">
+            <nav class="menu-tabs">
+              <button class="menu-tab is-active" data-tab="play" type="button">
+                <i
+                  class="bi bi-controller menu-tab-icon"
+                  aria-hidden="true"
+                ></i>
+                <span class="menu-tab-title">Play</span>
+                <span class="menu-tab-subtitle">Start or resume a run</span>
+              </button>
+              <button class="menu-tab" data-tab="how" type="button">
+                <i class="bi bi-compass menu-tab-icon" aria-hidden="true"></i>
+                <span class="menu-tab-title">How to Play</span>
+                <span class="menu-tab-subtitle">Controls & tips</span>
+              </button>
+              <button class="menu-tab" data-tab="options" type="button">
+                <i
+                  class="bi bi-sliders2-vertical menu-tab-icon"
+                  aria-hidden="true"
+                ></i>
+                <span class="menu-tab-title">Options</span>
+                <span class="menu-tab-subtitle"
+                  >Accessibility & preferences</span
+                >
+              </button>
+              <button class="menu-tab" data-tab="credits" type="button">
+                <i class="bi bi-stars menu-tab-icon" aria-hidden="true"></i>
+                <span class="menu-tab-title">Credits</span>
+                <span class="menu-tab-subtitle">Who made Pixelite</span>
+              </button>
+            </nav>
+            <div class="menu-content">
+              <section class="menu-pane is-active" data-pane="play">
+                <div class="menu-pane-title">Adventure Setup</div>
+                <div class="menu-pane-body">
+                  <button
+                    id="btnMenuContinue"
+                    class="menu-primary"
+                    type="button"
+                    disabled
+                  >
+                    Continue Adventure
+                  </button>
+                  <div class="menu-divider">or begin a new tale</div>
+                  <div class="menu-seed-form">
+                    <label class="menu-label" for="menuSeed"
+                      >Choose your seed</label
+                    >
+                    <input
+                      id="menuSeed"
+                      type="text"
+                      autocomplete="off"
+                      spellcheck="false"
+                      placeholder="Leave blank for a surprise island"
+                    />
+                    <div class="menu-seed-actions">
+                      <button
+                        id="btnMenuStartSeed"
+                        class="menu-primary"
+                        type="button"
+                      >
+                        Start With Seed
+                      </button>
+                      <button
+                        id="btnMenuStartRandom"
+                        class="menu-secondary"
+                        type="button"
+                      >
+                        Start Random Island
+                      </button>
+                    </div>
+                  </div>
+                  <div id="menuMsg" class="menu-msg"></div>
+                </div>
+              </section>
+              <section class="menu-pane" data-pane="how">
+                <div class="menu-pane-title">How to Play</div>
+                <div class="menu-pane-body menu-how">
+                  <ul class="menu-list">
+                    <li>
+                      <strong>Explore:</strong> Use <kbd>WASD</kbd> or the arrow
+                      keys to roam the island tile-by-tile.
+                    </li>
+                    <li>
+                      <strong>Engage:</strong> Bump into enemies to enter a
+                      turn-based battle. Pick abilities from the battle menu to
+                      attack, shield, or heal.
+                    </li>
+                    <li>
+                      <strong>Grow stronger:</strong> Collect coins, clear
+                      levels, and defeat foes to gain XP. Level ups restore your
+                      health and boost max HP.
+                    </li>
+                    <li>
+                      <strong>Visit merchants:</strong> Restock potions, heal,
+                      and unlock new skills between fights.
+                    </li>
+                    <li>
+                      <strong>Need a break?</strong> Press <kbd>Esc</kbd> to
+                      open this menu at any time. Your progress auto-saves as
+                      you play.
+                    </li>
+                  </ul>
+                </div>
+              </section>
+              <section class="menu-pane" data-pane="options">
+                <div class="menu-pane-title">Options & Accessibility</div>
+                <div class="menu-pane-body menu-options">
+                  <button
+                    id="btnMenuToggleMute"
+                    class="menu-option"
+                    type="button"
+                  >
+                    <div class="menu-option-info">
+                      <span class="menu-option-title">Audio</span>
+                      <span class="menu-option-desc"
+                        >Toggle music and sound effects.</span
+                      >
+                    </div>
+                    <span class="menu-option-value" id="menuSoundLabel"
+                      >On</span
+                    >
+                  </button>
+                  <button
+                    id="btnMenuToggleMinimap"
+                    class="menu-option"
+                    type="button"
+                  >
+                    <div class="menu-option-info">
+                      <span class="menu-option-title">Minimap Overlay</span>
+                      <span class="menu-option-desc"
+                        >Keep a navigator view on-screen.</span
+                      >
+                    </div>
+                    <span class="menu-option-value" id="menuMinimapLabel"
+                      >On</span
+                    >
+                  </button>
+                  <button
+                    id="btnMenuDeleteSave"
+                    class="menu-option menu-option-danger"
+                    type="button"
+                  >
+                    <div class="menu-option-info">
+                      <span class="menu-option-title">Clear Save Data</span>
+                      <span class="menu-option-desc"
+                        >Erase the current island progress.</span
+                      >
+                    </div>
+                    <span class="menu-option-value">Reset</span>
+                  </button>
+                  <div class="menu-hint">
+                    Additional settings are coming soon. Have feedback? Let us
+                    know!
+                  </div>
+                </div>
+              </section>
+              <section class="menu-pane" data-pane="credits">
+                <div class="menu-pane-title">Credits</div>
+                <div class="menu-pane-body menu-credits">
+                  <p>
+                    <strong>Feroov</strong> designs, codes, illustrates, and
+                    scores Pixelite as a personal hobby project.
+                  </p>
+                  <ul class="menu-list">
+                    <li><strong>Design, code &amp; art:</strong> Feroov</li>
+                    <li><strong>Music &amp; audio:</strong> Feroov</li>
+                  </ul>
+                  <p>
+                    Created for fun and experimentation. Thanks for playing!
+                  </p>
+                </div>
+              </section>
+            </div>
+          </div>
+          <div class="menu-footer">
+            Tip: press <kbd>Esc</kbd> to open the menu while exploring.
+          </div>
         </div>
       </div>
       <div id="levelUp" class="menu is-hidden">
         <div class="menu-panel">
+          <div class="menu-aura" aria-hidden="true"></div>
           <div class="menu-title-text">Level Complete</div>
           <div id="levelUpMsg" class="menu-msg"></div>
           <div class="menu-buttons">
@@ -70,6 +246,7 @@
             <button class="battle-btn" data-move="2"></button>
             <button class="battle-btn" data-move="3"></button>
             <button class="battle-btn" data-move="4"></button>
+            <button class="battle-btn" data-move="5"></button>
           </div>
           <button id="battleContinue" class="battle-continue is-hidden">
             Continue
@@ -77,14 +254,57 @@
         </div>
       </div>
 
+      <div id="shop" class="shop is-hidden">
+        <div class="shop-panel">
+          <div class="shop-header">
+            <div class="shop-title">Wandering Merchant</div>
+            <button id="shopClose" class="shop-close" type="button">
+              Leave
+            </button>
+          </div>
+          <div class="shop-face">
+            <img
+              id="shopMerchantImg"
+              class="shop-merchant-img"
+              src="assets/merchant.png"
+              alt="Merchant"
+            />
+            <div id="shopPlayerHP" class="shop-player-hp"></div>
+          </div>
+          <div id="shopMessage" class="shop-message"></div>
+          <div class="shop-heal">
+            <div class="shop-heal-info">
+              <div class="shop-section-title">Restore Health</div>
+              <div id="shopHealStatus" class="shop-heal-status"></div>
+            </div>
+            <button id="shopHealBtn" class="shop-action" type="button">
+              Buy Heal
+            </button>
+          </div>
+          <div class="shop-potions">
+            <div class="shop-section-title">Health Potions</div>
+            <div class="shop-potion-row">
+              <div class="shop-potion-count">
+                In satchel: <span id="shopPotionCount">0</span>
+              </div>
+              <button id="shopPotionBtn" class="shop-action" type="button">
+                Buy Potion
+              </button>
+            </div>
+          </div>
+          <div class="shop-skills">
+            <div class="shop-section-title">Skill Scrolls</div>
+            <div id="shopSkillList" class="shop-skill-list"></div>
+          </div>
+        </div>
+      </div>
+
       <div class="hud">
         <div id="hud-world">
-          World: <span id="worldName">demo</span> | Seed:
+          Seed:
           <span id="worldSeed">--</span>
         </div>
-        <div id="hud-coords">
-          Tile: <span id="txy">0,0</span> | Pos: <span id="pxy">0,0</span>
-        </div>
+
         <div id="hud-score">
           <span class="hud-stat">Level <strong id="level">1</strong></span>
           <span class="hud-stat">Score <strong id="score">0</strong></span>
@@ -94,8 +314,17 @@
             <span class="hud-coins-label">Coins</span>
             <strong id="coins">0</strong>
           </span>
+          <span class="hud-stat"
+            >Player Lv <strong id="playerLevel">1</strong></span
+          >
+          <span class="hud-stat hud-xp"
+            >XP <strong id="playerXp">0/60</strong></span
+          >
         </div>
-        <div id="hud-tile">On: <span id="tileName">?</span></div>
+        <div id="hud-hearts" class="hud-hearts">
+          <img src="assets/heart.png" alt="" class="hud-heart-icon" />
+          <span id="hudHpText">--/--</span>
+        </div>
         <div id="hud-steps">
           Steps: <span id="steps">0</span> | Time: <span id="time">0s</span>
         </div>
@@ -103,11 +332,21 @@
       </div>
 
       <div class="buttons">
-        <button id="btnSave" title="Save now">Save</button>
-        <button id="btnRestart" title="Restart current island">Restart</button>
-        <button id="btnReset" title="Generate a new island">New Seed</button>
-        <button id="btnMenu" title="Open menu">Menu</button>
-        <button id="btnMute" title="Toggle mute">Mute</button>
+        <button id="btnSave" title="Save now">
+          <i class="bi bi-save2"></i><span>Save</span>
+        </button>
+        <button id="btnRestart" title="Restart current island">
+          <i class="bi bi-arrow-repeat"></i><span>Restart</span>
+        </button>
+        <button id="btnReset" title="Generate a new island">
+          <i class="bi bi-dice-5"></i><span>New Seed</span>
+        </button>
+        <button id="btnMenu" title="Open menu">
+          <i class="bi bi-list-nested"></i><span>Menu</span>
+        </button>
+        <button id="btnMute" title="Toggle mute">
+          <i class="bi bi-volume-up-fill"></i><span>Mute</span>
+        </button>
       </div>
     </div>
 
